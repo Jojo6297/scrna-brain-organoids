@@ -12,7 +12,7 @@ https://doi.org/10.1038/s41467-022-32115-4
 ## Repository Structure
 
 - `analysis/`: R Markdown source code.
-- `results/`: Rendered HTML analysis report.
+- `results/`: Rendered PDF analysis report.
 - `notes/`: Supporting lecture notes.
 
 ## Analysis
