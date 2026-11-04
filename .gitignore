@@ -1,0 +1,17 @@
+# Personal and sensitive files
+.env
+.Renviron
+.Rhistory
+.RData
+*.key
+*.pem
+
+# Big files
+*.txt
+*.RDS
+
+# Local and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
