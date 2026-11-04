@@ -12,7 +12,7 @@ https://doi.org/10.1038/s41467-022-32115-4
 ## Repository Structure
 
 - `analysis/`: R Markdown source code.
-- `docs/`: Rendered html analysis report.
+- `docs/`: Rendered html analysis report; [**Open the interactive HTML analysis report**](https://jojo6297.github.io/scrna-brain-organoids/)
 - `notes/`: Supporting lecture notes.
 
 ## Analysis
