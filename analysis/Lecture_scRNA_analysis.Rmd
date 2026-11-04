@@ -1,0 +1,502 @@
+---
+title: "scRNA analysis - Brain organoids"
+author: "Jyoti"
+date: "2026-03-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## scRNA-seq Workflow from the publication: "Functional neuronal circuitry and oscillatory dynamics in human brain organoids", <https://doi.org/10.1038/s41467-022-32115-4>
+```{r setup, include=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(
+  echo    = TRUE,    # show code in output
+  eval    = TRUE,    # actually run the code
+  warning = FALSE,   # suppress warnings
+  message = FALSE,   # show messages
+  cache   = FALSE,
+  set.seed(42)
+)
+
+```
+
+
+### Importing general libraries
+```{r general library import, warning=FALSE}
+
+library(tidyverse)
+library(dplyr)
+library(Matrix)
+library(ggplot2)
+
+```
+
+
+### Importing the dge matrices takes too long because of their size, therefore I imported and saved them as Seurat objects below
+```{r input, warning=FALSE}
+
+# read Drop-seq style DGE (Digital Gene Expression) matrices
+dge1 <- read.table("GSM6311611_org1_7mo_gene_exon_tagged.dge.txt",  header = TRUE,  row.names = 1,  sep = "\t", check.names = FALSE)
+
+dge1[1:5, 1:5]
+
+cat(paste0("Dimensions of the dge matrix (organoid 1):","\n","rows (genes) = ", dim(dge1)[1], ", columns (cells) = ", dim(dge1)[2]))
+# dge2 <- read.table("GSM6311612_org2_7mo_gene_exon_tagged.dge.txt",  header = TRUE,  row.names = 1,  sep = "\t", check.names = FALSE)
+# dge3 <- read.table("GSM6311613_org3_7mo_gene_exon_tagged.dge.txt",  header = TRUE,  row.names = 1,  sep = "\t", check.names = FALSE)
+# 
+# # convert to sparse matrix BEFORE Seurat
+dge1_sparse <- as(as.matrix(dge1), "dgCMatrix")
+dge1_sparse[1:5,1:5]
+# dge2_sparse <- as(as.matrix(dge2), "dgCMatrix")
+# dge3_sparse <- as(as.matrix(dge3), "dgCMatrix")
+# 
+# colnames(dge1_sparse) <- paste0("org1-", colnames(dge1_sparse))
+# colnames(dge2_sparse) <- paste0("org2-", colnames(dge2_sparse))
+# colnames(dge3_sparse) <- paste0("org3-", colnames(dge3_sparse))
+
+
+library(Seurat)
+cat(paste0("R version: ", R.version.string))
+cat(paste0("Seurat version: ",packageVersion("Seurat")))
+
+# # create Seurat objects
+# seurat1 <- CreateSeuratObject(counts = dge1, project = "org1")
+# seurat2 <- CreateSeuratObject(counts = dge2, project = "org2")
+# seurat3 <- CreateSeuratObject(counts = dge3, project = "org3")
+# 
+# #View(seurat1@meta.data)
+# 
+# # save seurat objects (as R objects)
+# saveRDS(seurat1, file="GSM6311611_org1_7mo_gene_exon_tagged.seurat.RDS")
+# saveRDS(seurat2, file="GSM6311612_org2_7mo_gene_exon_tagged.seurat.RDS")
+# saveRDS(seurat3, file="GSM6311613_org3_7mo_gene_exon_tagged.seurat.RDS")
+
+```
+
+
+### An individual Seurat object was generated for each sample, and objects were merged using the Seurat merge function. Cells with <300 genes detected were filtered out, as were cells with >10% mitochondrial gene content.
+```{r, warning=FALSE}
+
+# import seurat objects
+seurat1 = readRDS("GSM6311611_org1_7mo_gene_exon_tagged.seurat.RDS")
+seurat2 = readRDS("GSM6311612_org2_7mo_gene_exon_tagged.seurat.RDS")
+seurat3 = readRDS("GSM6311613_org3_7mo_gene_exon_tagged.seurat.RDS")
+
+# merge Seurat objects
+merged <- merge(x = seurat1, y = list(seurat2, seurat3)) #, add.cell.ids = c("org1", "org2", "org3"))
+print(merged)
+head(merged@meta.data, 5)
+
+##################################################
+# # calculate mitochondrial percentage
+# genes <- rownames(merged[["RNA"]])
+# cells <- colnames(merged[["RNA"]])
+# counts <- merged[["RNA"]]$counts
+# 
+# # mitochondrial genes
+# mt_genes <- grep("^MT-", genes, value = TRUE)
+# 
+# # mictocondrial percentage of first cell
+# dimnames(counts) <- list(genes, cells)
+# sum(counts[mt_genes,1])/sum(counts[,1])
+##################################################
+
+merged <- PercentageFeatureSet(merged, pattern = "^MT-", col.name = 'percent.mt')
+head(merged@meta.data, 5)
+
+merged_temp <- subset(merged, subset = percent.mt > 10)
+head(merged_temp@meta.data, 5)
+
+# filter cells (done as the publication, but generally good to filter nCounts_RNA as well)
+merged <- subset(merged, subset = nFeature_RNA >= 300 & percent.mt <= 10)
+print(merged)
+
+VlnPlot(merged, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"))
+
+```
+
+
+
+### Counts data were log-normalized using the default NormalizeData function and the default scale of 1e4.
+```{r, warning=FALSE}
+# log-normalize counts (default parameters)
+merged <- NormalizeData(merged, normalization.method = "LogNormalize", scale.factor = 10000)
+
+# Pick 50 cells
+cells_to_plot <- sample(colnames(merged), 50)
+
+# Extract counts as a regular matrix
+counts_mat <- as.matrix(GetAssayData(merged, layer = "counts")[, cells_to_plot])
+data_mat   <- as.matrix(GetAssayData(merged, layer = "data")[, cells_to_plot])
+
+# Boxplot for raw counts
+boxplot(counts_mat,
+        main = "Raw counts per cell",
+        las = 2)
+
+# Boxplot for normalized data
+boxplot(data_mat,
+        main = "Normalized data per cell",
+        las = 2)
+
+```
+
+
+### The top 3000 variable genes were identified using the Seurat FindVariableFeatures function (election.method=“vst”, nfeatures=3000), followed by scaling and centering using the default ScaleData function.
+```{r, warning=FALSE}
+
+# identify highly variable genes
+merged <- FindVariableFeatures(merged, selection.method = "vst", nfeatures = 3000)
+VariableFeaturePlot(merged)
+
+## runs scaling on 3000 identified variable features
+merged <- ScaleData(merged)
+
+```
+
+
+### Principal Components Analysis was carried out on the scaled expression values of the 3000 top variable genes, and the cells were clustered using the first 30 principal components (PCs) as input in the FindNeighbors function, and a resolution of 0.4 in the FindClusters function. Non-linear dimensionality reduction was performed by running UMAP on the first 30 PCs.
+```{r, warning=FALSE}
+
+# PCA on the 3000 variable genes
+
+merged <- RunPCA(merged, features = VariableFeatures(object = merged))
+
+# Plotting PCA to visualize
+DimPlot(merged, reduction = 'pca', dims = c(1,2))
+
+
+DimPlot(merged, reduction = 'pca', dims = c(1,4))
+
+# Inspect variance explained
+ElbowPlot(merged, ndims = 50, reduction = 'pca')
+
+```
+
+
+```{r}
+# build SNN graph using first 30 PCs
+
+merged <- FindNeighbors(merged, dims = 1:30)
+
+# cluster cells at resolution 0.4
+
+merged <- FindClusters(merged, resolution = 0.4) # number of clusters increases with resolution
+
+# check the cluster the cells belong to
+Idents(merged)[1:10]
+
+
+merged <- RunUMAP(merged, dims = 1:30, seed.use = 42)
+DimPlot(merged, reduction = 'umap', label = TRUE, repel = TRUE)
+```
+
+
+### Following clustering and dimensionality reduction, putative cell doublets were identified using DoubletFinder 2.0.3, assuming a doublet formation rate of 5% and calculating homotypic proportions based on clustering at resolution 0.4 as described above. A pk value of 0.61 was selected for doublet identification based on the results of paramSweep_vs, summarizeSweep and find.pK functions of the DoubletFinder package.
+```{r}
+
+library(DoubletFinder)
+cat(paste0("DoubletFinder version: ",packageVersion("DoubletFinder")))
+
+# Tests many values of pK (neighborhood size) to see which best separates real cells from artificial doublets.
+sweep.res <- paramSweep(merged, PCs = 1:30, sct = FALSE) ##sct = if scTransform was used
+
+## Summarize results
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)   ## GT = Is ground truth available
+#head(sweep.stats, 10)
+
+pk.table <- find.pK(sweep.stats)
+
+ggplot(pk.table, aes(pK, BCmetric)) + #Bimodality coefficient
+  geom_line() + geom_point()
+
+```
+
+
+```{r}
+
+# expected doublet rate = 5%
+nExp_poi <- round(0.05 * length(merged$RNA_snn_res.0.4))
+cat(paste0("Number of doublets expected after 5% doublet rate: ", nExp_poi))
+
+# Estimate homotypic doublet proportion from clustering
+annotations <- merged@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations)
+
+# adjust expected number for homotypic doublets
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+cat(paste0("Number of doublets expected after adjusting for homotypic doublets: ", nExp_poi.adj))
+
+# Run DoubletFinder with chosen pK = 0.61 (neighborhood size)
+merged <- doubletFinder(
+  merged,
+  PCs = 1:30,
+  pN = 0.25,
+  pK = 0.61,
+  nExp = nExp_poi.adj,
+  reuse.pANN = FALSE,
+  sct = FALSE
+)
+
+head(merged@meta.data, 10)
+
+tail(merged@meta.data, 10)
+
+```
+
+
+### After filtering out the doublets as identified by DoubletFinder, counts data were extracted, and a new Seurat object was generated.
+```{r, warning=FALSE}
+
+# Filter out doublets
+filtered <- subset(merged, subset = DF.classifications_0.25_0.61_258 == "Singlet")
+
+# Extract counts and create new Seurat object
+filtered_counts <- GetAssayData(filtered, layer = "counts")
+seurat_new <- CreateSeuratObject(counts = filtered_counts, project = 'organoid')
+seurat_new$orig.ident = substr(colnames(filtered), 1, 4)
+
+```
+
+
+### Normalization, variable gene selection, scaling, clustering and UMAP dimensionality reduction were performed as described above with the exception that 32 PCs were used as input for clustering and UMAP. Clustering was performed at different resolutions (0.3, 0.4, 0.6 and 0.8). Clustering at resolution 0.4 resulted in 9 clusters and was in good agreement with the expression of known marker genes for cell types found in brain organoids (Supplementary Fig. 5b).
+```{r}
+
+# Normalize, variable features, scaling
+seurat_new <- NormalizeData(seurat_new, normalization.method = "LogNormalize", scale.factor = 10000)
+seurat_new <- FindVariableFeatures(seurat_new, selection.method = "vst", nfeatures = 3000)
+seurat_new <- ScaleData(seurat_new)
+
+# PCA
+seurat_new <- RunPCA(seurat_new, features = VariableFeatures(object = seurat_new))
+
+# Clustering at multiple resolutions
+seurat_new <- FindNeighbors(seurat_new, dims = 1:32)
+seurat_new <- FindClusters(seurat_new, resolution = c(0.4))
+
+# UMAP
+seurat_new <- RunUMAP(seurat_new, dims = 1:32, seed.use = 42)
+DimPlot(seurat_new, reduction = 'umap', label = TRUE, repel = TRUE)
+
+### Changing the cluster-numbers to match the manuscript-labeling so that they can be compared later
+### This clustering order can change each time, therefore it is important to first check umap and compare it with the manuscript's umap and then change the labels if necessary
+new_ids <- c(
+  "0" = "0",
+  "1" = "1",
+  "2" = "2",
+  "3" = "3",
+  "4" = "6",
+  "5" = "4",
+  "6" = "5",
+  "7" = "8",
+  "8" = "7"
+)
+
+Idents(seurat_new) <- plyr::mapvalues(
+  x = as.character(Idents(seurat_new)),
+  from = names(new_ids),
+  to   = new_ids
+)
+
+Idents(seurat_new) <- factor(
+  Idents(seurat_new),
+  levels = sort(as.character(unique(Idents(seurat_new))))
+)
+
+# Check clusters at resolution 0.4
+table(seurat_new$seurat_clusters)
+
+```
+
+
+### Cluster identities changed
+```{r}
+
+# UMAP
+seurat_new <- RunUMAP(seurat_new, dims = 1:32, seed.use = 42)
+DimPlot(seurat_new, reduction = 'umap', label = TRUE, repel = TRUE)
+
+```
+
+
+
+```{r}
+
+cluster_colors <- c(
+  "0" = "forestgreen",
+  "1" = "palegreen",
+  "2" = "orange",
+  "3" = "royalblue",
+  "4" = "pink",
+  "5" = "darkorchid3",
+  "6" = "chocolate4",
+  "7" = "red",
+  "8" = "magenta"
+)
+
+#png(paste0('_umap_',pk_val,'.png'), width = 7.5, height = 5, units = 'in', res = 300)
+DimPlot(seurat_new, reduction = 'umap', label = TRUE, cols = cluster_colors, pt.size = 1)
+#dev.off()
+
+```
+
+
+```{r, warning=FALSE, fig.height=8, fig.width=12}
+
+# Markers genes from supplementary figure 5
+FeaturePlot(seurat_new, features = c('DCX', 'GAD1', 'SLC17A7', 'VIM', 'GFAP', 'OLIG1', 'TOP2A'))
+
+```
+
+
+### Marker genes were identified for each cluster using the Wilcoxon rank sum test implemented the FindMarkers function, with a logFC threshold of 0.25 and Bonferroni correction for multiple testing, confirming and refining our initial cell type annotation using canonical marker genes.
+```{r marker genes, message=FALSE, warning=FALSE}
+
+# Find marker genes for all clusters
+markers <- FindAllMarkers(seurat_new, test.use = "wilcox", logfc.threshold = 0.25, p.adjust.methods ="bonferroni")
+
+# To save significant markers
+export_cluster_markers = markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05)
+#write.csv(export_cluster_markers, paste0("SignificantMarkers_", pk_val,".csv"))
+
+# Keep significant markers
+significant_markers <- markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% slice_min(order_by = p_val_adj, n = 5, with_ties = FALSE)
+
+```
+
+
+
+```{r Plots, message=FALSE, warning=FALSE, fig.height=20, fig.width=15}
+
+# Plot top 5 of all clusters
+genes = significant_markers$gene
+expr_mat <- GetAssayData(seurat_new, layer = "data")[genes, ]
+global_min <- min(expr_mat)
+global_max <- max(expr_mat)
+
+# FeaturePlot with fixed scale for all genes
+plots <- FeaturePlot(seurat_new, features = genes, combine = FALSE)
+
+plots <- lapply(plots, function(p){
+  p + scale_color_gradientn(
+    colors = c("lightgrey", "blue"),
+    limits = c(global_min, global_max)
+  ) + NoLegend()
+})
+
+cowplot::plot_grid(plotlist = plots, ncol = 5)
+
+```
+
+
+
+### Heatmap of the top 50 marker genes for each cluster, colored by z-scaled expression values.
+```{r Heatmap, message=FALSE, warning=FALSE, warning=FALSE, fig.height=11, fig.width=10}
+
+top50 <- markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(p_val_adj < 0.05) %>%
+  slice_min(order_by = p_val_adj, n = 50, with_ties = FALSE)
+
+# Heatmap of top 50 genes from each cluster (z-scaled expression)
+seurat_new <- ScaleData(seurat_new, features = unique(top50$gene))
+
+DoHeatmap(
+  seurat_new,
+  features = unique(top50$gene),
+  group.by = "seurat_clusters",
+  group.colors = cluster_colors
+) + NoLegend()
+
+```
+
+
+### Forebrain Features
+```{r Forebrain Features, message=FALSE, warning=FALSE, fig.height=10, fig.width=12}
+
+# Forebrain
+genes = c("FOXG1", "PAX6", "DLX1", "DLX2"
+          , "NEUROD4", "VSX1", "CRX", "RCVRN"
+          , "FOXA1", "ISL1", "TH", "TPH1"
+          , "SLC17A7", "GAD1", "GAD2")
+
+# Get global min/max across the selected genes
+expr_mat <- GetAssayData(seurat_new, layer = "data")[genes, ]
+global_min <- min(expr_mat)
+global_max <- max(expr_mat)
+
+# FeaturePlot with fixed scale for all genes
+plots <- FeaturePlot(seurat_new, features = genes, combine = FALSE, pt.size = .002)
+
+plots <- lapply(plots, function(p){
+  p + scale_color_gradientn(
+    colors = c("lightgrey", "blue"),
+    limits = c(global_min, global_max)
+  ) + NoLegend()
+})
+
+cowplot::plot_grid(plotlist = plots, ncol = 4)
+
+```
+
+
+
+### GlutamateReceptors
+```{r GlutamateReceptors, message=FALSE, warning=FALSE, fig.height = 9, fig.width = 12}
+
+#GlutamateReceptors
+genes = c("GRIA1", "GRIA2", "GRIA3", "GRIA4"
+          , "GRIN1", "GRIN2A", "GRIN2B", "GRIN2C"
+          , "GRIN2D", "GRIN3A", "GRIN3B")
+
+# Get global min/max across the selected genes
+expr_mat <- GetAssayData(seurat_new, layer = "data")[genes, ]
+global_min <- min(expr_mat)
+global_max <- max(expr_mat)
+
+# FeaturePlot with fixed scale for all genes
+plots <- FeaturePlot(seurat_new, features = genes, combine = FALSE)
+
+plots <- lapply(plots, function(p){
+  p + scale_color_gradientn(
+    colors = c("lightgrey", "blue"),
+    limits = c(global_min, global_max)
+  ) + NoLegend()
+})
+
+cowplot::plot_grid(plotlist = plots, ncol = 4)
+
+```
+
+
+
+### GABAReceptors
+```{r GABAReceptors, message=FALSE, warning=FALSE, fig.height=9, fig.width=12}
+
+#GABAReceptors
+genes = c("GABRA1", "GABRA2", "GABRA3", "GABRA4"
+          , "GABRA5", "GABRB1", "GABRB2", "GABRB3"
+          , "GABRG1", "GABRG2", "GABRG3"
+          , "GABRD", "GABRE", "GABRQ")
+
+# Get global min/max across the selected genes
+expr_mat <- GetAssayData(seurat_new, layer = "data")[genes, ]
+global_min <- min(expr_mat)
+global_max <- max(expr_mat)
+
+# FeaturePlot with fixed scale for all genes
+plots <- FeaturePlot(seurat_new, features = genes, combine = FALSE, pt.size = 0.0002)
+
+plots <- lapply(plots, function(p){
+  p + scale_color_gradientn(
+    colors = c("lightgrey", "blue"),
+    limits = c(global_min, global_max)
+  ) + NoLegend()
+})
+
+cowplot::plot_grid(plotlist = plots, ncol = 4)
+
+```
+
+
